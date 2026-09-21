@@ -79,10 +79,10 @@ namespace asio {
           ~default_io_service_scope();
           static void     set_num_threads(uint16_t num_threads);
           static uint16_t get_num_threads();
-          boost::asio::io_service*          io;
+          boost::asio::io_context*          io;
        private:
           std::vector<boost::thread*>       asio_threads;
-          boost::asio::io_service::work*    the_work;
+          boost::asio::executor_work_guard<boost::asio::io_context::executor_type>* the_work;
        protected:
           static uint16_t num_io_threads; // marked protected to help with testing
     };
@@ -93,7 +93,7 @@ namespace asio {
      * This IO service is automatically running in its own thread to service asynchronous
      * requests without blocking any other threads.
      */
-    boost::asio::io_service& default_io_service();
+    boost::asio::io_context& default_io_service();
 
     /** 
      *  @brief wraps boost::asio::async_read
@@ -238,7 +238,7 @@ namespace asio {
 
     namespace tcp {
         typedef boost::asio::ip::tcp::endpoint endpoint;
-        typedef boost::asio::ip::tcp::resolver::iterator resolver_iterator;
+        typedef boost::asio::ip::tcp::resolver::results_type resolver_results;
         typedef boost::asio::ip::tcp::resolver resolver;
         std::vector<endpoint> resolve( const std::string& hostname, const std::string& port );
 
@@ -250,7 +250,7 @@ namespace asio {
         template<typename SocketType, typename AcceptorType>
         void accept( AcceptorType& acc, SocketType& sock ) {
             promise<void>::ptr p = promise<void>::create("fc::asio::tcp::accept");
-            acc.async_accept( sock, boost::bind( fc::asio::detail::error_handler, p, _1 ) );
+            acc.async_accept( sock, boost::bind( fc::asio::detail::error_handler, p, boost::placeholders::_1 ) );
             p->wait();
             //if( ec ) BOOST_THROW_EXCEPTION( boost::system::system_error(ec) );
         }
@@ -262,14 +262,14 @@ namespace asio {
         template<typename AsyncSocket, typename EndpointType>
         void connect( AsyncSocket& sock, const EndpointType& ep ) {
             promise<void>::ptr p = promise<void>::create("fc::asio::tcp::connect");
-            sock.async_connect( ep, boost::bind( fc::asio::detail::error_handler, p, _1 ) );
+            sock.async_connect( ep, boost::bind( fc::asio::detail::error_handler, p, boost::placeholders::_1 ) );
             p->wait();
             //if( ec ) BOOST_THROW_EXCEPTION( boost::system::system_error(ec) );
         }
     }
     namespace udp {
         typedef boost::asio::ip::udp::endpoint endpoint;
-        typedef boost::asio::ip::udp::resolver::iterator resolver_iterator;
+        typedef boost::asio::ip::udp::resolver::results_type resolver_results;
         typedef boost::asio::ip::udp::resolver resolver;
         /// @brief resolve all udp::endpoints for hostname:port
         std::vector<endpoint> resolve( resolver& r, const std::string& hostname, 

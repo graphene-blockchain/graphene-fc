@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <fc/fwd.hpp>
 #include <fc/optional.hpp>
 #include <string>

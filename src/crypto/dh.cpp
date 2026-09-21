@@ -10,16 +10,31 @@ namespace fc {
     static bool validate( const ssl_dh& dh, bool& valid ) {
         int check;
         DH_check(dh,&check);
-        return valid = !(check /*& DH_CHECK_P_NOT_SAFE_PRIME*/);
+        if( check /*& DH_CHECK_P_NOT_SAFE_PRIME*/ )
+            return valid = false;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+        // OpenSSL 1.1 flagged every generator other than 2 and 5 (DH_UNABLE_TO_CHECK_GENERATOR);
+        // OpenSSL 3 accepts any g in [2, p-2] when q is unknown. Keep the old, stricter rule.
+        const BIGNUM* bn_g = nullptr;
+        DH_get0_pqg(dh.obj, nullptr, nullptr, &bn_g);
+        if( !bn_g || !( BN_is_word( bn_g, 2 ) || BN_is_word( bn_g, 5 ) ) )
+            return valid = false;
+#endif
+        return valid = true;
     }
 
    bool diffie_hellman::generate_params( int s, uint8_t g )
    {
         ssl_dh dh(DH_new());
-        DH_generate_parameters_ex(dh.obj, s, g, NULL);
+        p.clear();
+        // OpenSSL 3 refuses to generate parameters below its minimum modulus size (512 bits)
+        if( !DH_generate_parameters_ex(dh.obj, s, g, NULL) )
+            return valid = false;
 #if OPENSSL_VERSION_NUMBER >= 0x10100000L
         const BIGNUM* bn_p; // must not be free'd!
         DH_get0_pqg(dh.obj, &bn_p, NULL, NULL);
+        if( !bn_p )
+            return valid = false;
         p.resize( BN_num_bytes( bn_p ) );
         if( p.size() )
             BN_bn2bin( bn_p, (unsigned char*)&p.front()  );

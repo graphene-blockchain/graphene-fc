@@ -39,7 +39,9 @@ namespace  fc
 
        ~openssl_scope()
        {
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
           FIPS_mode_set(0);
+#endif
           CONF_modules_unload(1);
           EVP_cleanup();
           CRYPTO_cleanup_all_ex_data();

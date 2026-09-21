@@ -1,7 +1,7 @@
 #
 # Defines fc library target.
 
-CMAKE_MINIMUM_REQUIRED( VERSION 3.2 FATAL_ERROR )
+CMAKE_MINIMUM_REQUIRED( VERSION 3.5 FATAL_ERROR )
 PROJECT( fc )
 
 set( CMAKE_CXX_STANDARD 14 )
@@ -43,7 +43,7 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
 endif()
 
 SET(BOOST_COMPONENTS)
-LIST(APPEND BOOST_COMPONENTS coroutine thread date_time filesystem system program_options chrono unit_test_framework context iostreams regex)
+LIST(APPEND BOOST_COMPONENTS coroutine thread date_time filesystem program_options chrono unit_test_framework context iostreams regex)
 # boost::endian is also required, but FindBoost can't handle header-only libs
 SET( Boost_USE_STATIC_LIBS ON CACHE STRING "ON or OFF" )
 
@@ -99,7 +99,7 @@ if ( NOT WIN32 )
     ExternalProject_Add( project_editline
      PREFIX ${CMAKE_CURRENT_BINARY_DIR}/vendor/editline
      SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/vendor/editline
-     CONFIGURE_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/vendor/editline/configure --prefix=${CMAKE_CURRENT_BINARY_DIR}/vendor/editline
+     CONFIGURE_COMMAND ${CMAKE_COMMAND} -E env "CFLAGS=-std=gnu17 -O2" ${CMAKE_CURRENT_SOURCE_DIR}/vendor/editline/configure --prefix=${CMAKE_CURRENT_BINARY_DIR}/vendor/editline
      BUILD_COMMAND make
      INSTALL_COMMAND true
      BUILD_BYPRODUCTS ${CMAKE_CURRENT_BINARY_DIR}/vendor/editline/src/project_editline-build/src/.libs/libeditline.a
@@ -348,6 +348,18 @@ target_link_libraries( fc PUBLIC ${LINK_USR_LOCAL_LIB}  ${OPENSSL_LIBRARIES} ${Z
                                  ${PLATFORM_SPECIFIC_LIBS} ${RPCRT4} ${CMAKE_DL_LIBS} ${rt_library}
                                  ${editline_libraries} secp256k1 ${CMAKE_REQUIRED_LIBRARIES} )
 
+# Symbolized stack traces: Boost.Stacktrace's default backend prints bare addresses.
+# Use GCC's libbacktrace (reads symbols and DWARF) when the compiler ships it.
+if( CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND NOT APPLE AND NOT WIN32 )
+   execute_process( COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libbacktrace.a
+                    OUTPUT_VARIABLE FC_LIBBACKTRACE OUTPUT_STRIP_TRAILING_WHITESPACE )
+   if( IS_ABSOLUTE "${FC_LIBBACKTRACE}" AND EXISTS "${FC_LIBBACKTRACE}" )
+      message( STATUS "fc: using libbacktrace for stack traces: ${FC_LIBBACKTRACE}" )
+      set_source_files_properties( src/stacktrace.cpp PROPERTIES COMPILE_DEFINITIONS BOOST_STACKTRACE_USE_BACKTRACE )
+      target_link_libraries( fc PUBLIC ${FC_LIBBACKTRACE} )
+   endif()
+endif()
+
 if(WIN32 AND MSVC)
     set_source_files_properties( src/network/http/websocket.cpp PROPERTIES COMPILE_FLAGS "/bigobj" )
 elseif(WIN32 AND MINGW)
@@ -359,7 +371,9 @@ IF(NOT Boost_UNIT_TEST_FRAMEWORK_LIBRARY MATCHES "\\.(a|lib)$")
 IF(MSVC)
 add_definitions(/DBOOST_TEST_DYN_LINK)
 ELSE(MSVC)
-add_definitions(-DBOOST_TEST_DYN_LINK)
+if( NOT Boost_USE_STATIC_LIBS )
+  add_definitions(-DBOOST_TEST_DYN_LINK)
+endif()
 ENDIF(MSVC)
 ENDIF()
 

@@ -69,17 +69,15 @@ namespace fc {
             p->set_value(ec);
         }
 
-        template<typename EndpointType, typename IteratorType>
+        template<typename EndpointType, typename ResultsType>
         void resolve_handler(
                              const typename promise<std::vector<EndpointType> >::ptr& p,
                              const boost::system::error_code& ec,
-                             IteratorType itr) {
+                             const ResultsType& results) {
             if( !ec ) {
                 std::vector<EndpointType> eps;
-                while( itr != IteratorType() ) {
-                    eps.push_back(*itr);
-                    ++itr;
-                }
+                for( const auto& entry : results )
+                    eps.push_back( entry.endpoint() );
                 p->set_value( eps );
             } else {
                 p->set_exception(
@@ -112,8 +110,8 @@ namespace fc {
      */
     default_io_service_scope::default_io_service_scope()
     {
-       io           = new boost::asio::io_service();
-       the_work     = new boost::asio::io_service::work(*io);
+       io           = new boost::asio::io_context();
+       the_work     = new boost::asio::executor_work_guard<boost::asio::io_context::executor_type>( io->get_executor() );
 
        if( num_io_threads == 0 )
        {
@@ -179,7 +177,7 @@ namespace fc {
      * @brief create an io_service
      * @returns the io_service
      */
-    boost::asio::io_service& default_io_service() {
+    boost::asio::io_context& default_io_service() {
         static default_io_service_scope fc_asio_service[1];
         return *fc_asio_service[0].io;
     }
@@ -191,8 +189,9 @@ namespace fc {
         {
           resolver res( fc::asio::default_io_service() );
           promise<std::vector<boost::asio::ip::tcp::endpoint> >::ptr p = promise<std::vector<boost::asio::ip::tcp::endpoint> >::create("tcp::resolve completion");
-          res.async_resolve( boost::asio::ip::tcp::resolver::query(hostname,port),
-                            boost::bind( detail::resolve_handler<boost::asio::ip::tcp::endpoint,resolver_iterator>, p, _1, _2 ) );
+          res.async_resolve( hostname, port,
+                            boost::bind( detail::resolve_handler<boost::asio::ip::tcp::endpoint,resolver_results>, p,
+                                         boost::placeholders::_1, boost::placeholders::_2 ) );
           return p->wait();
         }
         FC_RETHROW_EXCEPTIONS(warn, "")
@@ -205,8 +204,9 @@ namespace fc {
         {
           resolver res( fc::asio::default_io_service() );
           promise<std::vector<endpoint> >::ptr p = promise<std::vector<endpoint> >::create("udp::resolve completion");
-          res.async_resolve( resolver::query(hostname,port),
-                              boost::bind( detail::resolve_handler<endpoint,resolver_iterator>, p, _1, _2 ) );
+          res.async_resolve( hostname, port,
+                              boost::bind( detail::resolve_handler<endpoint,resolver_results>, p,
+                                           boost::placeholders::_1, boost::placeholders::_2 ) );
           return p->wait();
         }
         FC_RETHROW_EXCEPTIONS(warn, "")

@@ -1,5 +1,6 @@
 #include <boost/test/unit_test.hpp>
 #include <boost/version.hpp>
+#include <boost/predef/version_number.h>
 #include <fc/time.hpp>
 
 using namespace fc;
