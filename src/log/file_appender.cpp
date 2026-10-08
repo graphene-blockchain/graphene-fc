@@ -148,7 +148,7 @@ namespace fc {
 
    file_appender::~file_appender(){}
 
-   // MS THREAD METHOD  MESSAGE \t\t\t File:Line
+   // TIMESTAMP THREAD METHOD LEVEL ] MESSAGE \t\t\t File:Line
    void file_appender::log( const log_message& m )
    {
       std::stringstream line;
@@ -171,7 +171,17 @@ namespace fc {
          line << std::setw( 20 ) << m.get_context().get_method().substr(p,20).c_str() <<" ";
       }
 
-      line << "] ";
+      // The level lets log readers (the Windows GUI) tell warnings and errors apart, as the console does with colours
+      const char* level = "";
+      switch( m.get_context().get_log_level().value )
+      {
+         case log_level::debug: level = "debug"; break;
+         case log_level::info:  level = "info";  break;
+         case log_level::warn:  level = "warn";  break;
+         case log_level::error: level = "error"; break;
+         default: break;
+      }
+      line << std::setw( 5 ) << std::left << level << std::right << " ] ";
       std::string message = fc::format_string( m.get_format(), m.get_data(), my->cfg.max_object_depth );
       line << message.c_str();
 

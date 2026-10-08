@@ -51,7 +51,7 @@ namespace fc {
       friend class tcp_server;
       class impl;
       #ifdef _WIN64
-      fc::fwd<impl,0xa8> my;
+      fc::fwd<impl,0xd0> my;
       #else
       fc::fwd<impl,0x88> my;
       #endif

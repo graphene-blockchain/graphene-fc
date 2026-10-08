@@ -290,6 +290,9 @@ namespace fc { namespace http {
       {
          std::atomic<uint32_t> pending{0};
          std::atomic<bool>     shutting_down{false};
+         /// Set once the server is past its last wait: a handler that fires later (for a connection that was
+         /// still opening when the server stopped) must not touch the destroyed server
+         std::atomic<bool>     destroyed{false};
       };
       typedef std::shared_ptr<server_shutdown_state> server_shutdown_state_ptr;
 
@@ -300,6 +303,7 @@ namespace fc { namespace http {
             explicit pending_work( const server_shutdown_state_ptr& state ) : _state( state ) { ++_state->pending; }
             ~pending_work() { --_state->pending; }
             bool shutting_down()const { return _state->shutting_down.load(); }
+            bool destroyed()const { return _state->destroyed.load(); }
          private:
             server_shutdown_state_ptr _state;
       };
@@ -309,8 +313,27 @@ namespace fc { namespace http {
       static void drain_pending_work( const server_shutdown_state_ptr& state )
       {
          state->shutting_down = true;
+         state->destroyed = true;
          while( state->pending.load() > 0 )
             fc::usleep( fc::milliseconds( 10 ) );
+      }
+
+      /// Waits for one step of a server shutdown, but not forever. The listener's "closed" callback comes
+      /// only if an accept was pending when it stopped, which misses when a client has just connected; and a
+      /// client that ignores the close handshake is dropped by websocketpp after its own 5 s timeout. A node
+      /// that never exits is worse than one that goes on to close its database.
+      static void wait_for_shutdown_step( const fc::promise<void>::ptr& step, const char* what )
+      {
+         try
+         {
+            step->wait( fc::seconds( 10 ) );
+         }
+         catch( const fc::timeout_exception& )
+         {
+            // This file logs to "rpc" (errors only by default); a shutdown matter belongs in the main log
+            fc::logger::get( "default" ).log(
+               FC_LOG_MESSAGE( warn, "Websocket server shutdown: ${w} not confirmed within 10 s, going on", ("w", what) ) );
+         }
       }
 
       class websocket_server_impl
@@ -319,6 +342,8 @@ namespace fc { namespace http {
             websocket_server_impl()
             :_server_thread( fc::thread::current() )
             {
+               // Handlers keep their own copy of the shutdown state: they may run after this object is gone
+               auto state = _shutdown;
 
                _server.clear_access_channels( websocketpp::log::alevel::all );
                _server.init_asio(&fc::asio::default_io_service());
@@ -326,8 +351,8 @@ namespace fc { namespace http {
                // Note: handlers run on asio worker threads and synchronously hand work over to the server thread.
                //       Capture the connection handle by value: a reference to the handler argument would dangle
                //       once the task runs later on the server thread.
-               _server.set_open_handler( [this]( connection_hdl hdl ){
-                    auto work = std::make_shared<pending_work>( _shutdown );
+               _server.set_open_handler( [this,state]( connection_hdl hdl ){
+                    auto work = std::make_shared<pending_work>( state );
                     if( work->shutting_down() )
                        return;
                     _server_thread.async( [this,hdl,work](){
@@ -335,8 +360,8 @@ namespace fc { namespace http {
                        _on_connection( _connections[hdl] = new_con );
                     }).wait();
                });
-               _server.set_message_handler( [this]( connection_hdl hdl, websocket_server_type::message_ptr msg ){
-                    auto work = std::make_shared<pending_work>( _shutdown );
+               _server.set_message_handler( [this,state]( connection_hdl hdl, websocket_server_type::message_ptr msg ){
+                    auto work = std::make_shared<pending_work>( state );
                     if( work->shutting_down() )
                        return;
                     _server_thread.async( [this,hdl,msg,work](){
@@ -358,8 +383,8 @@ namespace fc { namespace http {
                       s.lowest_layer().set_option(option);
                } );
 
-               _server.set_http_handler( [this]( connection_hdl hdl ){
-                    auto work = std::make_shared<pending_work>( _shutdown );
+               _server.set_http_handler( [this,state]( connection_hdl hdl ){
+                    auto work = std::make_shared<pending_work>( state );
                     if( work->shutting_down() )
                        return;
                     _server_thread.async( [this,hdl,work](){
@@ -382,8 +407,10 @@ namespace fc { namespace http {
                     }).wait();
                });
 
-               _server.set_close_handler( [this]( connection_hdl hdl ){
-                    auto work = std::make_shared<pending_work>( _shutdown );
+               _server.set_close_handler( [this,state]( connection_hdl hdl ){
+                    auto work = std::make_shared<pending_work>( state );
+                    if( work->destroyed() )
+                       return;
                     _server_thread.async( [this,hdl,work](){
                        if( _connections.find(hdl) != _connections.end() )
                        {
@@ -399,8 +426,10 @@ namespace fc { namespace http {
                     }).wait();
                });
 
-               _server.set_fail_handler( [this]( connection_hdl hdl ){
-                    auto work = std::make_shared<pending_work>( _shutdown );
+               _server.set_fail_handler( [this,state]( connection_hdl hdl ){
+                    auto work = std::make_shared<pending_work>( state );
+                    if( work->destroyed() )
+                       return;
                     _server_thread.async( [this,hdl,work](){
                        if( _connections.find(hdl) != _connections.end() )
                        {
@@ -437,11 +466,11 @@ namespace fc { namespace http {
                   websocketpp::lib::error_code ec;
                   for( auto& item : cpy_con )
                      _server.close( item.first, 0, "server exit", ec );
-                  _all_connections_closed->wait();
+                  wait_for_shutdown_step( _all_connections_closed, "closing client connections" );
                }
 
                if( _server_socket_closed )
-                  _server_socket_closed->wait();
+                  wait_for_shutdown_step( _server_socket_closed, "closing the listening socket" );
 
                // HTTP requests are not in _connections: wait for their handlers (and any other
                // queued handler work) so none of it runs against a destroyed server
@@ -466,6 +495,8 @@ namespace fc { namespace http {
             websocket_tls_server_impl( const string& server_pem, const string& ssl_password )
             :_server_thread( fc::thread::current() )
             {
+               // Handlers keep their own copy of the shutdown state: they may run after this object is gone
+               auto state = _shutdown;
                //if( server_pem.size() )
                {
                   _server.set_tls_init_handler( [=]( websocketpp::connection_hdl hdl ) -> context_ptr {
@@ -488,8 +519,8 @@ namespace fc { namespace http {
                _server.clear_access_channels( websocketpp::log::alevel::all );
                _server.init_asio(&fc::asio::default_io_service());
                _server.set_reuse_addr(true);
-               _server.set_open_handler( [this]( connection_hdl hdl ){
-                    auto work = std::make_shared<pending_work>( _shutdown );
+               _server.set_open_handler( [this,state]( connection_hdl hdl ){
+                    auto work = std::make_shared<pending_work>( state );
                     if( work->shutting_down() )
                        return;
                     _server_thread.async( [this,hdl,work](){
@@ -497,8 +528,8 @@ namespace fc { namespace http {
                        _on_connection( _connections[hdl] = new_con );
                     }).wait();
                });
-               _server.set_message_handler( [this]( connection_hdl hdl, websocket_server_type::message_ptr msg ){
-                    auto work = std::make_shared<pending_work>( _shutdown );
+               _server.set_message_handler( [this,state]( connection_hdl hdl, websocket_server_type::message_ptr msg ){
+                    auto work = std::make_shared<pending_work>( state );
                     if( work->shutting_down() )
                        return;
                     _server_thread.async( [this,hdl,msg,work](){
@@ -511,8 +542,8 @@ namespace fc { namespace http {
                     }).wait();
                });
 
-               _server.set_http_handler( [this]( connection_hdl hdl ){
-                    auto work = std::make_shared<pending_work>( _shutdown );
+               _server.set_http_handler( [this,state]( connection_hdl hdl ){
+                    auto work = std::make_shared<pending_work>( state );
                     if( work->shutting_down() )
                        return;
                     _server_thread.async( [this,hdl,work](){
@@ -536,8 +567,10 @@ namespace fc { namespace http {
                     }).wait();
                });
 
-               _server.set_close_handler( [this]( connection_hdl hdl ){
-                    auto work = std::make_shared<pending_work>( _shutdown );
+               _server.set_close_handler( [this,state]( connection_hdl hdl ){
+                    auto work = std::make_shared<pending_work>( state );
+                    if( work->destroyed() )
+                       return;
                     _server_thread.async( [this,hdl,work](){
                        if( _connections.find(hdl) != _connections.end() )
                        {
@@ -549,8 +582,10 @@ namespace fc { namespace http {
                     }).wait();
                });
 
-               _server.set_fail_handler( [this]( connection_hdl hdl ){
-                    auto work = std::make_shared<pending_work>( _shutdown );
+               _server.set_fail_handler( [this,state]( connection_hdl hdl ){
+                    auto work = std::make_shared<pending_work>( state );
+                    if( work->destroyed() )
+                       return;
                     _server_thread.async( [this,hdl,work](){
                        if( _connections.find(hdl) != _connections.end() )
                        {
@@ -579,11 +614,11 @@ namespace fc { namespace http {
                   websocketpp::lib::error_code ec;
                   for( auto& item : cpy_con )
                      _server.close( item.first, 0, "server exit", ec );
-                  _all_connections_closed->wait();
+                  wait_for_shutdown_step( _all_connections_closed, "closing client connections" );
                }
 
                if( _server_socket_closed )
-                  _server_socket_closed->wait();
+                  wait_for_shutdown_step( _server_socket_closed, "closing the listening socket" );
 
                drain_pending_work( _shutdown );
             }

@@ -257,7 +257,7 @@ endif(WIN32)
 # end editline stuff
 
 IF(WIN32)
-  target_compile_definitions(fc PUBLIC WIN32 NOMINMAX _WIN32_WINNT=0x0501 _CRT_SECURE_NO_WARNINGS
+  target_compile_definitions(fc PUBLIC WIN32 NOMINMAX _WIN32_WINNT=0x0A00 _CRT_SECURE_NO_WARNINGS
     _SCL_SERCURE_NO_WARNINGS
     # Needed to disable MSVC autolinking feature (#pragma comment)
     BOOST_ALL_NO_LIB
